@@ -1,0 +1,157 @@
+#include <WiFi.h>
+#include <PubSubClient.h> 
+
+#define ssid "Wokwi-GUEST"
+#define password ""
+
+// Configurações do MQTT
+const char* mqttServer = "iluminacao.cloud.shiftr.io";
+const int mqttPort = 1883;
+const char* mqttUser = "iluminacao";
+const char* mqttPassword = "D5ubCjvE0ASDln1u";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// Pinos do ESP32
+const int pinoDimmer = 22; // Pino conectado ao Dimmer
+const int botaoLigar = 18;  // Pino conectado ao botão de ligar/aumentar intensidade
+const int botaoDesligar = 19; // Pino conectado ao botão de desligar/diminuir intensidade
+
+int brilho = 0;
+int intensidadeAtual = 0;  // Intensidade da lâmpada (0-100%)
+int intensidadeObjetivo = 0;  // Intensidade desejada para transição
+unsigned long tempoUltimaMudanca = 0;  // Tempo da última mudança de intensidade
+const unsigned long intervaloMudanca = 50;  // Intervalo entre mudanças de intensidade (em ms)
+
+void setup() {
+  Serial.begin(115200);
+
+  // Configuração dos pinos
+  pinMode(pinoDimmer, OUTPUT);
+  pinMode(botaoLigar, INPUT_PULLUP);
+  pinMode(botaoDesligar, INPUT_PULLUP);
+
+  // Conecta à rede Wi-Fi
+  conectarWiFi();
+
+  // Configura o cliente MQTT
+  client.setServer(mqttServer, mqttPort);
+  client.setCallback(callbackMQTT);
+
+  // Conecta ao servidor MQTT
+  conectarMQTT();
+}
+
+void loop() {
+  // Verifica se o cliente MQTT está conectado
+  if (!client.connected()) {
+    conectarMQTT();
+  }
+  client.loop();
+
+  // Verifica o estado dos botões físicos
+  verificarBotoes();
+
+  // Atualiza a intensidade da lâmpada gradualmente
+  atualizarIntensidade();
+}
+
+void conectarWiFi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Conectando-se a ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi conectado");
+  Serial.println("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void conectarMQTT() {
+  while (!client.connected()) {
+    Serial.println("Conectando ao MQTT...");
+
+    if (client.connect("ESP32Client", mqttUser, mqttPassword)) {
+      Serial.println("Conectado ao MQTT");
+
+      // Subscreve aos tópicos relevantes
+      client.subscribe("controle/comando");
+      client.subscribe("controle/variavel");
+    } else {
+      Serial.print("Falha ao conectar. Estado: ");
+      Serial.print(client.state());
+      delay(2000);
+    }
+  }
+}
+
+void callbackMQTT(char* topic, byte* payload, unsigned int length) {
+  String mensagem = "";
+
+  for (int i = 0; i < length; i++) {
+    mensagem += (char)payload[i];
+  }
+
+  Serial.print("Mensagem: ");
+  Serial.println(mensagem);
+
+  // Verifica o tópico e executa a ação apropriada
+  if (String(topic) == "controle/comando") {
+    if(mensagem == "ligar"){
+      intensidadeObjetivo = 100; 
+    }else if(mensagem == "desligar"){
+      intensidadeObjetivo = 0;  // Define o objetivo para 0%
+    }
+  } else if (String(topic) == "controle/variavel") {
+    brilho = mensagem.toInt();
+    intensidadeObjetivo = brilho;  // Ajusta a intensidade de acordo com a mensagem
+  }
+}
+
+void atualizarIntensidade() {
+  // Se o tempo decorrido desde a última mudança for maior que o intervalo
+  if (millis() - tempoUltimaMudanca >= intervaloMudanca) {
+    // if (intensidadeAtual < intensidadeObjetivo) {
+    //   intensidadeAtual++;
+    // } else if (intensidadeAtual > intensidadeObjetivo) {
+    //   intensidadeAtual--;
+    // }
+    intensidadeAtual = intensidadeObjetivo;
+
+    // Atualiza o valor PWM do dimmer
+    analogWrite(pinoDimmer, map(intensidadeAtual, 0, 100, 0, 255));
+
+    // Atualiza o tempo da última mudança
+    tempoUltimaMudanca = millis();
+
+    Serial.print("Intensidade atual: ");
+    Serial.println(intensidadeAtual);
+  }
+}
+
+void verificarBotoes() {
+  if (digitalRead(botaoLigar) == LOW) {
+    if (intensidadeObjetivo < 100) {
+      intensidadeObjetivo += 10;  // Aumenta a intensidade em 10%
+      intensidadeObjetivo = constrain(intensidadeObjetivo, 0, 100);
+      delay(300);  // Debounce
+    }
+  }
+
+  if (digitalRead(botaoDesligar) == LOW) {
+    if (intensidadeObjetivo > 0) {
+      intensidadeObjetivo -= 10;  // Diminui a intensidade em 10%
+      intensidadeObjetivo = constrain(intensidadeObjetivo, 0, 100);
+      delay(300);  // Debounce
+    }
+  }
+}
