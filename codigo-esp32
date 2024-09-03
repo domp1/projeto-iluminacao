@@ -1,8 +1,8 @@
 #include <WiFi.h>
-#include <PubSubClient.h> 
+#include <PubSubClient.h>
 
-#define ssid "Wokwi-GUEST"
-#define password ""
+#define ssid "S22 de Pablo"
+#define password "krfr5441"
 
 // Configurações do MQTT
 const char* mqttServer = "iluminacao.cloud.shiftr.io";
@@ -14,23 +14,56 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 
 // Pinos do ESP32
-const int pinoDimmer = 22; // Pino conectado ao Dimmer
+const int controle = 22; // Pino de controle do dimmer
+const int zc = 23;       // Pino de detecção de zero-crossing
 const int botaoLigar = 18;  // Pino conectado ao botão de ligar/aumentar intensidade
 const int botaoDesligar = 19; // Pino conectado ao botão de desligar/diminuir intensidade
 
-int brilho = 0;
-int intensidadeAtual = 0;  // Intensidade da lâmpada (0-100%)
 int intensidadeObjetivo = 0;  // Intensidade desejada para transição
-unsigned long tempoUltimaMudanca = 0;  // Tempo da última mudança de intensidade
-const unsigned long intervaloMudanca = 50;  // Intervalo entre mudanças de intensidade (em ms)
+volatile int atrasoAtual = 8000;  // Atraso inicial em microsegundos
+
+void IRAM_ATTR aumentarIntensidade() {
+  if (intensidadeObjetivo < 100) {
+    intensidadeObjetivo += 10;  // Aumenta a intensidade em 1%
+  }
+}
+
+void IRAM_ATTR diminuirIntensidade() {
+  if (intensidadeObjetivo > 0) {
+    intensidadeObjetivo -= 10;  // Diminui a intensidade em 1%
+  }
+}
+
+void IRAM_ATTR sincronizarComZeroCrossing() {
+    // Limita a intensidade máxima a 80%
+    int intensidadeLimitada = intensidadeObjetivo;
+    if (intensidadeObjetivo >= 80) {
+        intensidadeLimitada = 60;
+    }
+
+    // Calcula o atraso baseado na intensidade limitada
+    atrasoAtual = map(intensidadeLimitada, 0, 100, 8200, 0);  // Ajuste de 8000 a 0 us
+
+    // Sincroniza com o zero-crossing e aplica o atraso
+    delayMicroseconds(atrasoAtual);
+    digitalWrite(controle, HIGH);
+    delayMicroseconds(10);  // Pulso curto para garantir acionamento do TRIAC
+    digitalWrite(controle, LOW);
+}
 
 void setup() {
   Serial.begin(115200);
 
   // Configuração dos pinos
-  pinMode(pinoDimmer, OUTPUT);
+  pinMode(controle, OUTPUT);
+  pinMode(zc, INPUT);
   pinMode(botaoLigar, INPUT_PULLUP);
   pinMode(botaoDesligar, INPUT_PULLUP);
+
+  // Configuração das interrupções
+  attachInterrupt(digitalPinToInterrupt(botaoLigar), aumentarIntensidade, FALLING);
+  attachInterrupt(digitalPinToInterrupt(botaoDesligar), diminuirIntensidade, FALLING);
+  attachInterrupt(digitalPinToInterrupt(zc), sincronizarComZeroCrossing, RISING);
 
   // Conecta à rede Wi-Fi
   conectarWiFi();
@@ -49,12 +82,6 @@ void loop() {
     conectarMQTT();
   }
   client.loop();
-
-  // Verifica o estado dos botões físicos
-  verificarBotoes();
-
-  // Atualiza a intensidade da lâmpada gradualmente
-  atualizarIntensidade();
 }
 
 void conectarWiFi() {
@@ -106,52 +133,13 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
 
   // Verifica o tópico e executa a ação apropriada
   if (String(topic) == "controle/comando") {
-    if(mensagem == "ligar"){
-      intensidadeObjetivo = 100; 
-    }else if(mensagem == "desligar"){
+    if (mensagem == "ligar") {
+      intensidadeObjetivo = 100;
+    } else if (mensagem == "desligar") {
       intensidadeObjetivo = 0;  // Define o objetivo para 0%
     }
   } else if (String(topic) == "controle/variavel") {
-    brilho = mensagem.toInt();
-    intensidadeObjetivo = brilho;  // Ajusta a intensidade de acordo com a mensagem
+    intensidadeObjetivo = mensagem.toInt();  // Ajusta a intensidade de acordo com a mensagem
   }
 }
 
-void atualizarIntensidade() {
-  // Se o tempo decorrido desde a última mudança for maior que o intervalo
-  if (millis() - tempoUltimaMudanca >= intervaloMudanca) {
-    // if (intensidadeAtual < intensidadeObjetivo) {
-    //   intensidadeAtual++;
-    // } else if (intensidadeAtual > intensidadeObjetivo) {
-    //   intensidadeAtual--;
-    // }
-    intensidadeAtual = intensidadeObjetivo;
-
-    // Atualiza o valor PWM do dimmer
-    analogWrite(pinoDimmer, map(intensidadeAtual, 0, 100, 0, 255));
-
-    // Atualiza o tempo da última mudança
-    tempoUltimaMudanca = millis();
-
-    Serial.print("Intensidade atual: ");
-    Serial.println(intensidadeAtual);
-  }
-}
-
-void verificarBotoes() {
-  if (digitalRead(botaoLigar) == LOW) {
-    if (intensidadeObjetivo < 100) {
-      intensidadeObjetivo += 10;  // Aumenta a intensidade em 10%
-      intensidadeObjetivo = constrain(intensidadeObjetivo, 0, 100);
-      delay(300);  // Debounce
-    }
-  }
-
-  if (digitalRead(botaoDesligar) == LOW) {
-    if (intensidadeObjetivo > 0) {
-      intensidadeObjetivo -= 10;  // Diminui a intensidade em 10%
-      intensidadeObjetivo = constrain(intensidadeObjetivo, 0, 100);
-      delay(300);  // Debounce
-    }
-  }
-}
